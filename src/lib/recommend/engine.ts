@@ -12,12 +12,15 @@ import {
   prescore,
   scoreCandidate,
   type CandidateFeatures,
+  type IdfTables,
   type ScoredCandidate,
 } from "./score";
+import { buildIdf } from "./vector";
 
-/** Detail fetches are the expensive step, so only the most promising slice is enriched. */
-const ENRICH_LIMIT = 40;
+/** Detail fetches are the expensive step, so each page enriches only a slice. */
+const ENRICH_PER_PAGE = 40;
 const ENRICH_CONCURRENCY = 8;
+const DEFAULT_PAGE_SIZE = 24;
 
 export interface RecommendationFilters {
   mediaType?: MediaType | "all";
@@ -26,6 +29,10 @@ export interface RecommendationFilters {
   /** Drop anything below this TMDB vote count. Guards against obscure noise. */
   minVotes?: number;
   limit?: number;
+  /** Zero-based page. Each page enriches and ranks the next slice of the pool. */
+  page?: number;
+  /** Keys already shown to the user, so scrolling never repeats a title. */
+  excludeKeys?: string[];
 }
 
 export interface RecommendationResult {
@@ -36,6 +43,8 @@ export interface RecommendationResult {
     eraCenter: number | null;
     anchors: { title: string; rating: number | null; posterPath: string | null }[];
   };
+  page: number;
+  hasMore: boolean;
   poolSize: number;
   enrichedCount: number;
   generatedAt: string;
@@ -101,39 +110,64 @@ function passesFilters(candidate: Candidate, filters: RecommendationFilters): bo
 
 /**
  * Full pipeline: profile the library, fan out for candidates, cheaply rank them,
- * enrich the shortlist with keywords and credits, score properly, then
- * diversify the final list.
+ * enrich one page worth of the shortlist with keywords and credits, score
+ * properly, then diversify.
+ *
+ * Paging works by advancing through the prescored pool rather than re-ranking
+ * from scratch, so "load more" costs one enrich pass and never repeats a title.
  */
 export async function recommend(
   library: TrackedTitle[],
   filters: RecommendationFilters = {},
 ): Promise<RecommendationResult> {
-  const limit = Math.min(filters.limit ?? 24, 50);
+  const limit = Math.min(filters.limit ?? DEFAULT_PAGE_SIZE, 50);
+  const page = Math.max(0, Math.min(filters.page ?? 0, 25));
+  const excluded = new Set(filters.excludeKeys ?? []);
+
   const profile = buildTasteProfile(library);
   const [genreNames, pool] = await Promise.all([
     loadGenreNames(),
     generateCandidates(profile),
   ]);
 
-  const eligible = pool.filter((candidate) => passesFilters(candidate, filters));
+  const eligible = pool.filter(
+    (candidate) => passesFilters(candidate, filters) && !excluded.has(candidate.key),
+  );
 
-  const shortlist = eligible
-    .map((candidate) => ({ candidate, pre: prescore(candidate, profile) }))
+  // Genre IDF over the actual pool: "Drama" on 80% of candidates tells us far
+  // less about fit than a genre that only a handful of them share.
+  const genreIdf = buildIdf(eligible.map((candidate) => candidate.genreIds));
+
+  const ranked = eligible
+    .map((candidate) => ({ candidate, pre: prescore(candidate, profile, genreIdf) }))
     .sort((a, b) => b.pre - a.pre)
-    .slice(0, ENRICH_LIMIT)
     .map((entry) => entry.candidate);
 
+  const start = page * ENRICH_PER_PAGE;
+  const shortlist = ranked.slice(start, start + ENRICH_PER_PAGE);
   const enriched = await mapWithConcurrency(shortlist, ENRICH_CONCURRENCY, enrich);
 
   const featuresByKey = new Map<string, CandidateFeatures>();
-  const scored: ScoredCandidate[] = [];
+  const usable: { candidate: Candidate; features: CandidateFeatures }[] = [];
 
   shortlist.forEach((candidate, index) => {
     const features = enriched[index];
     if (!features) return;
     featuresByKey.set(candidate.key, features);
-    scored.push(scoreCandidate(candidate, features, profile, genreNames));
+    usable.push({ candidate, features });
   });
+
+  // Keyword IDF from the enriched slice, for the same reason as genres:
+  // "workplace" across half the shortlist is weak evidence, a tag on two of
+  // them is strong.
+  const idf: IdfTables = {
+    genres: genreIdf,
+    keywords: buildIdf(usable.map((entry) => entry.features.keywordIds)),
+  };
+
+  const scored = usable.map((entry) =>
+    scoreCandidate(entry.candidate, entry.features, profile, genreNames, idf),
+  );
 
   return {
     recommendations: diversify(scored, featuresByKey, limit),
@@ -148,6 +182,8 @@ export async function recommend(
         posterPath: anchor.posterPath,
       })),
     },
+    page,
+    hasMore: ranked.length > start + ENRICH_PER_PAGE,
     poolSize: pool.length,
     enrichedCount: featuresByKey.size,
     generatedAt: new Date().toISOString(),

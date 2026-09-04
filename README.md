@@ -68,6 +68,13 @@ signal = statusWeight × sentiment × recencyDecay
   as a rejection.
 - **Recency decay** — an 18-month half-life, floored at `0.55`, so old favourites still
   count but current taste leads.
+- **Engagement** — a series rated highly after two episodes is a weaker endorsement than
+  one rated highly after finishing it. Floored at `0.65`, because plenty of people rate a
+  show without ever ticking an episode and should not be penalised for it. Films are
+  unaffected.
+
+Ratings on series count exactly as much as ratings on films: nothing in the profile
+branches on media type.
 
 Before any of that, keywords are filtered ([`keywords.ts`](src/lib/tmdb/keywords.ts)).
 TMDB mixes real themes with bookkeeping — production trivia (`sequel`, `woman director`),
@@ -109,17 +116,37 @@ enriched with bounded concurrency and then scored properly:
 
 | Component | Weight | What it measures |
 | --- | --- | --- |
-| Keyword cosine | 0.30 | Thematic overlap — the strongest signal |
-| Source agreement | 0.26 | How many of your titles independently point here |
-| Genre cosine | 0.16 | Broad category fit |
+| Keyword cosine | 0.34 | Thematic overlap — the strongest signal |
+| Source agreement | 0.18 | How many of your titles independently point here |
 | People cosine | 0.14 | Recurring cast, directors, creators |
-| Quality prior | 0.09 | Bayesian-smoothed TMDB rating |
+| Genre cosine | 0.12 | Broad category fit |
+| Quality prior | 0.10 | Bayesian-smoothed TMDB rating |
+| Novelty | 0.07 | Mild edge to titles you have not been shown everywhere |
 | Era affinity | 0.03 | Distance from your era centre |
 | Language affinity | 0.02 | Share of your library in that language |
+
+Both cosines are **IDF-weighted against the live candidate pool**. Without that, breadth
+beats precision: `Drama` sits on most candidates and `workplace` on a great many, so a
+plain cosine rewards titles that share nothing but a category. Weighting by
+`log((N+1)/(df+0.5))` pushes the score toward the tags that actually separate one
+candidate from another — the difference between matching on `workplace` and matching on
+`cyberpunk, tech noir`.
+
+Source agreement is held deliberately low. TMDB's own `/recommendations` skews hard
+toward whatever is widely watched, so leaning on it surfaces the same handful of
+blockbuster dramas regardless of who is asking.
 
 The quality prior is a **Bayesian average** against a 6.5 mean with a 500-vote prior, so a
 10.0 backed by three votes cannot outrank an 8.4 backed by twenty thousand. Source
 agreement uses `1 − e^(−Σweights)`, so a fourth mention adds much less than the second.
+
+The 0-100 shown on each card is a presentation scale over the blended cosine. Only the
+ordering carries meaning; it is not a probability.
+
+Results are paged rather than capped. Each page advances through the prescored pool and
+enriches the next slice, so scrolling costs one enrich pass per page and never re-ranks
+from scratch. The client sends back the keys it has already shown, so a title can never
+appear twice even if the pool shifts between requests.
 
 ### 4. Diversify — `score.ts`
 

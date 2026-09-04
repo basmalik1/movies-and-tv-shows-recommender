@@ -29,8 +29,23 @@ export interface Candidate extends NormalizedTitle {
   sources: CandidateSource[];
 }
 
+type QueryValue = string | number | boolean | undefined | null;
+
 /** How many library titles seed the "more like this" fan-out. */
 const ANCHOR_LIMIT = 12;
+
+/**
+ * Two pages of TMDB's own recommendations plus one of /similar per anchor.
+ * A deep pool is what makes "keep scrolling" possible: each page of results
+ * enriches the next slice, so the pool has to be several hundred titles.
+ */
+const ANCHOR_QUERIES = [
+  { endpoint: "recommendations", page: 1 },
+  { endpoint: "recommendations", page: 2 },
+  { endpoint: "similar", page: 1 },
+] as const;
+
+const DISCOVER_PAGES = [1, 2] as const;
 const GENRE_SEEDS = 3;
 const KEYWORD_SEEDS = 6;
 
@@ -90,10 +105,10 @@ export async function generateCandidates(profile: TasteProfile): Promise<Candida
   const anchors = profile.anchors.slice(0, ANCHOR_LIMIT);
 
   const anchorRequests = anchors.flatMap((anchor) =>
-    (["recommendations", "similar"] as const).map(async (endpoint) => {
+    ANCHOR_QUERIES.map(async ({ endpoint, page: pageNumber }) => {
       const page = await tmdbGetSafe<TmdbPaginated<TmdbSearchResult>>(
         `${anchor.mediaType}/${anchor.tmdbId}/${endpoint}`,
-        { page: 1 },
+        { page: pageNumber },
         { revalidate: 60 * 60 * 12 },
       );
       return {
@@ -114,55 +129,59 @@ export async function generateCandidates(profile: TasteProfile): Promise<Candida
     ...(wantsTv ? (["tv"] as const) : []),
   ];
 
-  const discoverRequests = discoverTypes.flatMap((mediaType) => {
-    const requests: Promise<{
-      results?: TmdbSearchResult[];
-      mediaType: MediaType;
-      source: CandidateSource;
-    }>[] = [];
+  const discoverRequests = discoverTypes.flatMap((mediaType) =>
+    DISCOVER_PAGES.flatMap((pageNumber) => {
+      const requests: Promise<{
+        results?: TmdbSearchResult[];
+        mediaType: MediaType;
+        source: CandidateSource;
+      }>[] = [];
 
-    if (topGenres.length > 0) {
-      requests.push(
-        discover(mediaType, {
-          with_genres: topGenres.join("|"),
-          sort_by: "vote_average.desc",
-          "vote_count.gte": 300,
-        })
-          .then((page) => ({
-            results: page.results,
-            mediaType,
-            source: { kind: "discover" as const, weight: SOURCE_WEIGHT.discover },
-          }))
-          .catch(() => ({
-            results: undefined,
-            mediaType,
-            source: { kind: "discover" as const, weight: SOURCE_WEIGHT.discover },
-          })),
-      );
-    }
+      const run = (
+        params: Record<string, QueryValue>,
+        weight: number,
+      ): Promise<{
+        results?: TmdbSearchResult[];
+        mediaType: MediaType;
+        source: CandidateSource;
+      }> => {
+        const source: CandidateSource = { kind: "discover", weight };
+        return discover(mediaType, { ...params, page: pageNumber })
+          .then((page) => ({ results: page.results, mediaType, source }))
+          .catch(() => ({ results: undefined, mediaType, source }));
+      };
 
-    if (topKeywords.length > 0) {
-      requests.push(
-        discover(mediaType, {
-          with_keywords: topKeywords.join("|"),
-          sort_by: "popularity.desc",
-          "vote_count.gte": 80,
-        })
-          .then((page) => ({
-            results: page.results,
-            mediaType,
-            source: { kind: "discover" as const, weight: SOURCE_WEIGHT.discover * 1.2 },
-          }))
-          .catch(() => ({
-            results: undefined,
-            mediaType,
-            source: { kind: "discover" as const, weight: SOURCE_WEIGHT.discover * 1.2 },
-          })),
-      );
-    }
+      if (topGenres.length > 0) {
+        requests.push(
+          run(
+            {
+              with_genres: topGenres.join("|"),
+              sort_by: "vote_average.desc",
+              "vote_count.gte": 300,
+            },
+            SOURCE_WEIGHT.discover,
+          ),
+        );
+      }
 
-    return requests;
-  });
+      if (topKeywords.length > 0) {
+        requests.push(
+          run(
+            {
+              with_keywords: topKeywords.join("|"),
+              sort_by: "popularity.desc",
+              // Raised from 80: below this the keyword feed is mostly
+              // straight-to-streaming filler nobody wants recommended.
+              "vote_count.gte": 250,
+            },
+            SOURCE_WEIGHT.discover * 1.2,
+          ),
+        );
+      }
+
+      return requests;
+    }),
+  );
 
   const trendingRequest = getTrending("week")
     .then((page) => ({

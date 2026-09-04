@@ -2,7 +2,7 @@ import type { NormalizedTitle } from "@/lib/tmdb/types";
 
 import type { Candidate } from "./candidates";
 import type { TasteProfile } from "./profile";
-import { contributions, cosineWithSet } from "./vector";
+import { applyIdf, contributions, cosineWithSet, type SparseVector } from "./vector";
 
 /** Feature ids resolved for a candidate after its detail payload is fetched. */
 export interface CandidateFeatures {
@@ -26,8 +26,15 @@ export interface ScoreBreakdown {
   genres: number;
   neighbours: number;
   quality: number;
+  novelty: number;
   era: number;
   language: number;
+}
+
+/** IDF tables computed over the live candidate pool, not baked in. */
+export interface IdfTables {
+  genres: SparseVector;
+  keywords: SparseVector;
 }
 
 export interface ScoredCandidate extends NormalizedTitle {
@@ -43,12 +50,22 @@ export interface ScoredCandidate extends NormalizedTitle {
   via: { title: string; rating: number | null }[];
 }
 
+/**
+ * Tuned against real libraries. Two deliberate choices:
+ *
+ * - Thematic overlap outranks everything, because it is the only component
+ *   that reflects why someone liked a title rather than that it was popular.
+ * - Neighbour agreement is held down: TMDB's own /recommendations skew hard
+ *   toward whatever is widely watched, so leaning on it surfaces the same
+ *   handful of blockbuster dramas for everyone.
+ */
 const WEIGHTS: ScoreBreakdown = {
-  keywords: 0.3,
+  keywords: 0.34,
   people: 0.14,
-  genres: 0.16,
-  neighbours: 0.26,
-  quality: 0.09,
+  genres: 0.12,
+  neighbours: 0.18,
+  quality: 0.1,
+  novelty: 0.07,
   era: 0.03,
   language: 0.02,
 };
@@ -59,6 +76,9 @@ const WEIGHTS: ScoreBreakdown = {
  */
 const PRIOR_VOTES = 500;
 const PRIOR_MEAN = 6.5;
+
+/** Tuned so a strong thematic match lands in the 70s-80s rather than the 60s. */
+const DISPLAY_SCALE = 175;
 
 function qualityPrior(title: NormalizedTitle): number {
   const votes = title.voteCount;
@@ -77,6 +97,17 @@ function neighbourScore(candidate: Candidate): number {
   return 1 - Math.exp(-total);
 }
 
+/**
+ * Mild preference for titles the user is less likely to have already been
+ * pushed at from every direction. Deliberately gentle: crank this up and the
+ * list fills with obscure things nobody wants.
+ */
+function novelty(title: NormalizedTitle): number {
+  const reach = Math.log10(Math.max(1, title.voteCount));
+  // ~0 votes -> 1.0, 1k votes -> 0.7, 100k votes -> 0.17
+  return Math.min(1, Math.max(0, 1 - (reach - 1) / 3.5));
+}
+
 function eraAffinity(title: NormalizedTitle, profile: TasteProfile): number {
   if (!profile.eraCenter || !title.year) return 0.5;
   return Math.exp(-Math.abs(title.year - profile.eraCenter) / 25);
@@ -89,10 +120,15 @@ function languageAffinity(title: NormalizedTitle, profile: TasteProfile): number
 }
 
 /** Cheap first pass over the whole pool, before spending requests on detail fetches. */
-export function prescore(candidate: Candidate, profile: TasteProfile): number {
+export function prescore(
+  candidate: Candidate,
+  profile: TasteProfile,
+  genreIdf: SparseVector = {},
+): number {
+  const genres = applyIdf(profile.genres, genreIdf);
   return (
-    0.55 * neighbourScore(candidate) +
-    0.3 * Math.max(0, cosineWithSet(profile.genres, candidate.genreIds)) +
+    0.5 * neighbourScore(candidate) +
+    0.35 * Math.max(0, cosineWithSet(genres, candidate.genreIds)) +
     0.15 * qualityPrior(candidate)
   );
 }
@@ -155,13 +191,19 @@ export function scoreCandidate(
   features: CandidateFeatures,
   profile: TasteProfile,
   genreNames: Record<number, string>,
+  idf: IdfTables = { genres: {}, keywords: {} },
 ): ScoredCandidate {
+  // Rare, specific tags should count for more than ubiquitous ones.
+  const keywordProfile = applyIdf(profile.keywords, idf.keywords);
+  const genreProfile = applyIdf(profile.genres, idf.genres);
+
   const breakdown: ScoreBreakdown = {
-    keywords: cosineWithSet(profile.keywords, features.keywordIds),
+    keywords: cosineWithSet(keywordProfile, features.keywordIds),
     people: cosineWithSet(profile.people, features.peopleIds),
-    genres: cosineWithSet(profile.genres, candidate.genreIds),
+    genres: cosineWithSet(genreProfile, candidate.genreIds),
     neighbours: neighbourScore(candidate),
     quality: qualityPrior(candidate),
+    novelty: novelty(candidate),
     era: eraAffinity(candidate, profile),
     language: languageAffinity(candidate, profile),
   };
@@ -171,7 +213,7 @@ export function scoreCandidate(
     0,
   );
 
-  const matchedKeywords = contributions(profile.keywords, features.keywordIds)
+  const matchedKeywords = contributions(keywordProfile, features.keywordIds)
     .slice(0, 5)
     .map((entry) => profile.keywordNames[entry.id] ?? features.keywordNames[entry.id])
     .filter((name): name is string => Boolean(name));
@@ -181,7 +223,7 @@ export function scoreCandidate(
     .map((entry) => profile.peopleNames[entry.id] ?? features.peopleNames[entry.id])
     .filter((name): name is string => Boolean(name));
 
-  const matchedGenres = contributions(profile.genres, candidate.genreIds)
+  const matchedGenres = contributions(genreProfile, candidate.genreIds)
     .slice(0, 3)
     .map((entry) => genreNames[entry.id])
     .filter((name): name is string => Boolean(name));
@@ -199,8 +241,10 @@ export function scoreCandidate(
   return {
     ...candidate,
     key: candidate.key,
-    // Blended cosines land in a narrow band; stretch them into a readable 0-100.
-    score: Math.round(Math.min(100, Math.max(0, raw * 145))),
+    // Blended cosines land in a narrow band, and IDF weighting narrows it
+    // further, so stretch into a readable 0-100. This is a presentation scale,
+    // not a probability: only the ordering is meaningful.
+    score: Math.round(Math.min(100, Math.max(0, raw * DISPLAY_SCALE))),
     breakdown,
     reasons: buildReasons(
       candidate,

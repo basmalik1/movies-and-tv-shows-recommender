@@ -30,6 +30,14 @@ const RATING_SPAN = 3.5;
 const RECENCY_HALF_LIFE_DAYS = 540;
 const MIN_RECENCY = 0.55;
 
+/**
+ * A series rated highly after two episodes is a weaker endorsement than one
+ * rated highly after finishing it. The floor is deliberately high (0.65)
+ * because plenty of people rate a show without ever ticking an episode, and
+ * they should not be punished for that.
+ */
+const MIN_ENGAGEMENT = 0.65;
+
 /** Features backed by a single title are shrunk toward zero to resist noise. */
 const SUPPORT_PRIOR = 1.5;
 
@@ -78,6 +86,17 @@ function sentimentOf(title: TrackedTitle): number {
   return IMPLICIT_SENTIMENT[title.status];
 }
 
+function engagementOf(title: TrackedTitle): number {
+  if (title.mediaType === "movie") return 1;
+
+  const total = title.totalEpisodes ?? 0;
+  const watched = title.watchedEpisodes.length;
+  if (total <= 0) return title.status === "completed" ? 1 : 0.85;
+
+  const share = Math.min(1, watched / total);
+  return MIN_ENGAGEMENT + (1 - MIN_ENGAGEMENT) * share;
+}
+
 function recencyOf(title: TrackedTitle, now: number): number {
   const touchedAt = title.lastWatchedAt ?? title.completedAt ?? title.updatedAt ?? title.addedAt;
   const ageDays = Math.max(0, (now - touchedAt) / 86_400_000);
@@ -87,7 +106,12 @@ function recencyOf(title: TrackedTitle, now: number): number {
 
 /** Signed strength of a single library entry's opinion. */
 export function signalOf(title: TrackedTitle, now = Date.now()): number {
-  return STATUS_WEIGHT[title.status] * sentimentOf(title) * recencyOf(title, now);
+  return (
+    STATUS_WEIGHT[title.status] *
+    sentimentOf(title) *
+    recencyOf(title, now) *
+    engagementOf(title)
+  );
 }
 
 /**

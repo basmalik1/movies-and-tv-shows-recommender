@@ -52,3 +52,39 @@ export function topEntries(vector: SparseVector, count: number): { id: number; v
     .sort((a, b) => b.value - a.value)
     .slice(0, count);
 }
+
+/**
+ * Smoothed inverse document frequency over a set of feature lists.
+ *
+ * Without this, breadth beats precision: "Drama" sits on almost every candidate
+ * and "workplace" on a great many, so they dominate a cosine that treats every
+ * feature as equally informative. IDF pushes weight toward the features that
+ * actually separate one candidate from another.
+ */
+export function buildIdf(documents: number[][]): SparseVector {
+  const total = documents.length;
+  if (total === 0) return {};
+
+  const frequency = new Map<number, number>();
+  for (const document of documents) {
+    for (const id of new Set(document)) {
+      frequency.set(id, (frequency.get(id) ?? 0) + 1);
+    }
+  }
+
+  const idf: SparseVector = {};
+  for (const [id, count] of frequency) {
+    idf[id] = Math.log((total + 1) / (count + 0.5));
+  }
+  return idf;
+}
+
+/** Scale a profile vector by IDF, so common features stop drowning out rare ones. */
+export function applyIdf(profile: SparseVector, idf: SparseVector, fallback = 1): SparseVector {
+  const out: SparseVector = {};
+  for (const [key, value] of Object.entries(profile)) {
+    const id = Number(key);
+    out[id] = value * (idf[id] ?? fallback);
+  }
+  return out;
+}

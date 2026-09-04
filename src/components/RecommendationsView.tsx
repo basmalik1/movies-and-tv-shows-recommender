@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useLibrary } from "@/lib/library/LibraryProvider";
 import type { RecommendationResult } from "@/lib/recommend/engine";
@@ -10,6 +10,7 @@ import { SparkIcon } from "./icons";
 import { TitleCard, TitleGrid } from "./TitleCard";
 import { EmptyState, ErrorNotice, PageHeader, Spinner } from "./ui";
 
+type Recommendation = RecommendationResult["recommendations"][number];
 type MediaFilter = "all" | "movie" | "tv";
 
 interface Filters {
@@ -20,6 +21,30 @@ interface Filters {
 
 /** Enough signal for the profile to mean something rather than echo one title. */
 const MIN_USEFUL_LIBRARY = 3;
+
+/** How close the end of the grid must get before the next page is requested. */
+const LOAD_MORE_MARGIN = 600;
+
+interface RunState {
+  runId: number;
+  items: Recommendation[];
+  profile: RecommendationResult["profile"] | null;
+  /** How many pages have come back for this run. */
+  pagesLoaded: number;
+  hasMore: boolean;
+  poolSize: number;
+  error: string | null;
+}
+
+const EMPTY_RUN: RunState = {
+  runId: -1,
+  items: [],
+  profile: null,
+  pagesLoaded: 0,
+  hasMore: false,
+  poolSize: 0,
+  error: null,
+};
 
 function ScoreBadge({ score }: { score: number }) {
   const tone =
@@ -89,17 +114,14 @@ function ProfilePanel({ profile }: { profile: RecommendationResult["profile"] })
 export function RecommendationsView() {
   const { titles, ready } = useLibrary();
   const [filters, setFilters] = useState<Filters>({ mediaType: "all" });
-  /** Bumped by Regenerate to re-run the pipeline with unchanged filters. */
-  const [nonce, setNonce] = useState(0);
-  const [settled, setSettled] = useState<{
-    key: string;
-    result: RecommendationResult | null;
-    error: string | null;
-  } | null>(null);
+  /** Bumped whenever the result set should be thrown away and rebuilt. */
+  const [runId, setRunId] = useState(0);
+  const [wantPage, setWantPage] = useState(0);
+  const [run, setRun] = useState<RunState>(EMPTY_RUN);
 
   /**
    * The library is read at request time rather than tracked as a dependency:
-   * rating one title should not silently re-run a forty-request pipeline.
+   * rating one title should not silently re-run the whole pipeline.
    */
   const titlesRef = useRef(titles);
   useEffect(() => {
@@ -107,17 +129,23 @@ export function RecommendationsView() {
   }, [titles]);
 
   const enabled = ready && titles.length >= MIN_USEFUL_LIBRARY;
-  const requestKey = useMemo(() => JSON.stringify({ filters, nonce }), [filters, nonce]);
+  const isStale = run.runId !== runId;
+  const needsPage = isStale || run.pagesLoaded <= wantPage;
+  const loading = enabled && needsPage && run.error === null;
 
-  // Loading is derived from "the settled result is not for the current request"
-  // so the effect below never sets state synchronously.
-  const loading = enabled && settled?.key !== requestKey;
-  const result = settled?.result ?? null;
-  const error = settled?.key === requestKey ? settled.error : null;
+  // Everything below is derived, so the fetch effect never sets state synchronously.
+  const items = isStale ? [] : run.items;
+  const profile = isStale ? null : run.profile;
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !needsPage || run.error !== null) return;
+
     const controller = new AbortController();
+    const reset = run.runId !== runId;
+    const page = reset ? 0 : wantPage;
+    // Sending what has already been shown means a page can never repeat a title,
+    // even if the pool shifted between requests.
+    const excludeKeys = reset ? [] : run.items.map((item) => item.key);
 
     void (async () => {
       try {
@@ -127,25 +155,101 @@ export function RecommendationsView() {
           signal: controller.signal,
           body: JSON.stringify({
             library: titlesRef.current,
-            filters: { ...filters, limit: 24 },
+            filters: { ...filters, limit: 24, page, excludeKeys },
           }),
         });
 
         const body = await response.json();
         if (!response.ok) throw new Error(body.error ?? "Could not build recommendations.");
-        setSettled({ key: requestKey, result: body as RecommendationResult, error: null });
+        const result = body as RecommendationResult;
+
+        setRun((previous) => ({
+          runId,
+          items: reset ? result.recommendations : [...previous.items, ...result.recommendations],
+          profile: result.profile,
+          pagesLoaded: page + 1,
+          hasMore: result.hasMore && result.recommendations.length > 0,
+          poolSize: result.poolSize,
+          error: null,
+        }));
       } catch (caught) {
         if (controller.signal.aborted) return;
-        setSettled({
-          key: requestKey,
-          result: null,
+        setRun((previous) => ({
+          ...previous,
+          runId,
           error: caught instanceof Error ? caught.message : "Something went wrong.",
-        });
+        }));
       }
     })();
 
     return () => controller.abort();
-  }, [enabled, requestKey, filters]);
+  }, [enabled, needsPage, runId, wantPage, filters, run.runId, run.items, run.error]);
+
+  const canLoadMore = !isStale && run.hasMore && !loading && run.error === null;
+
+  // Pull the next page in as the sentinel nears the viewport.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node || !canLoadMore) return;
+
+    let requested = false;
+    const request = () => {
+      if (requested) return;
+      const rect = node.getBoundingClientRect();
+      if (rect.top - window.innerHeight < LOAD_MORE_MARGIN) {
+        requested = true;
+        setWantPage((page) => page + 1);
+      }
+    };
+
+    /**
+     * IntersectionObserver is the efficient path, but it does not run in every
+     * environment — a backgrounded tab or an embedded webview can leave it
+     * silently inert — so a throttled scroll check backs it up. Timers keep
+     * firing where rAF and the observer do not.
+     */
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) request();
+      },
+      { rootMargin: `${LOAD_MORE_MARGIN}px` },
+    );
+    observer.observe(node);
+
+    let throttle: ReturnType<typeof setTimeout> | null = null;
+    const onScroll = () => {
+      if (throttle !== null) return;
+      throttle = setTimeout(() => {
+        throttle = null;
+        request();
+      }, 150);
+    };
+
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll, { passive: true });
+
+    /**
+     * Covers a grid that already ends inside the viewport, where no scroll will
+     * ever arrive. Staggered because posters load after mount and change the
+     * page height under us — a single check on mount can measure too early.
+     */
+    const initialChecks = [0, 250, 800].map((delay) => setTimeout(request, delay));
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      if (throttle !== null) clearTimeout(throttle);
+      for (const check of initialChecks) clearTimeout(check);
+    };
+  }, [canLoadMore]);
+
+  function restart(next: Filters) {
+    setFilters(next);
+    setWantPage(0);
+    setRunId((id) => id + 1);
+  }
 
   if (!ready) {
     return (
@@ -182,7 +286,7 @@ export function RecommendationsView() {
             type="button"
             className="btn btn-primary"
             disabled={loading}
-            onClick={() => setNonce((value) => value + 1)}
+            onClick={() => restart(filters)}
           >
             <SparkIcon width={15} height={15} />
             {loading ? "Thinking…" : "Regenerate"}
@@ -195,7 +299,7 @@ export function RecommendationsView() {
           <button
             key={option}
             type="button"
-            onClick={() => setFilters((current) => ({ ...current, mediaType: option }))}
+            onClick={() => restart({ ...filters, mediaType: option })}
             aria-pressed={filters.mediaType === option}
             className={`btn ${filters.mediaType === option ? "btn-primary" : "btn-ghost"}`}
           >
@@ -208,10 +312,10 @@ export function RecommendationsView() {
           aria-label="Earliest release year"
           value={filters.minYear ?? ""}
           onChange={(event) =>
-            setFilters((current) => ({
-              ...current,
+            restart({
+              ...filters,
               minYear: event.target.value ? Number(event.target.value) : undefined,
-            }))
+            })
           }
         >
           <option value="">Any era</option>
@@ -226,10 +330,10 @@ export function RecommendationsView() {
           aria-label="Minimum popularity"
           value={filters.minVotes ?? ""}
           onChange={(event) =>
-            setFilters((current) => ({
-              ...current,
+            restart({
+              ...filters,
               minVotes: event.target.value ? Number(event.target.value) : undefined,
-            }))
+            })
           }
         >
           <option value="">Any popularity</option>
@@ -238,54 +342,74 @@ export function RecommendationsView() {
         </select>
       </div>
 
-      {error && <ErrorNotice>{error}</ErrorNotice>}
-      {loading && !result && <Spinner label="Profiling your library and searching TMDB…" />}
+      {run.error && !isStale && <ErrorNotice>{run.error}</ErrorNotice>}
+      {loading && items.length === 0 && (
+        <Spinner label="Profiling your library and searching TMDB…" />
+      )}
 
-      {result && (
+      {profile && <ProfilePanel profile={profile} />}
+
+      {items.length > 0 && (
         <>
-          <ProfilePanel profile={result.profile} />
+          <TitleGrid>
+            {items.map((item, index) => (
+              <TitleCard
+                key={item.key}
+                tmdbId={item.tmdbId}
+                mediaType={item.mediaType}
+                title={item.title}
+                posterPath={item.posterPath}
+                year={item.year}
+                priority={index < 6}
+                overlay={<ScoreBadge score={item.score} />}
+                footer={
+                  <ul className="space-y-0.5">
+                    {item.reasons.slice(0, 2).map((reason) => (
+                      <li
+                        key={reason.text}
+                        className="line-clamp-2 text-[0.7rem] leading-snug text-ink-400"
+                      >
+                        {reason.text}
+                      </li>
+                    ))}
+                  </ul>
+                }
+              />
+            ))}
+          </TitleGrid>
 
-          {result.recommendations.length === 0 ? (
-            <EmptyState title="No matches with those filters">
-              Loosen the era or popularity filter and try again.
-            </EmptyState>
-          ) : (
-            <>
-              <TitleGrid>
-                {result.recommendations.map((item, index) => (
-                  <TitleCard
-                    key={item.key}
-                    tmdbId={item.tmdbId}
-                    mediaType={item.mediaType}
-                    title={item.title}
-                    posterPath={item.posterPath}
-                    year={item.year}
-                    priority={index < 6}
-                    overlay={<ScoreBadge score={item.score} />}
-                    footer={
-                      <ul className="space-y-0.5">
-                        {item.reasons.slice(0, 2).map((reason) => (
-                          <li
-                            key={reason.text}
-                            className="line-clamp-2 text-[0.7rem] leading-snug text-ink-400"
-                          >
-                            {reason.text}
-                          </li>
-                        ))}
-                      </ul>
-                    }
-                  />
-                ))}
-              </TitleGrid>
+          <div ref={sentinelRef} className="mt-8 flex flex-col items-center gap-3">
+            {loading && <Spinner label="Ranking more candidates…" />}
 
-              <p className="mt-7 text-xs text-ink-400">
-                Ranked {result.enrichedCount} of {result.poolSize} candidates gathered from your
-                library&rsquo;s neighbours, your top genres and themes, and this week&rsquo;s
-                trending titles.
+            {canLoadMore && !loading && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setWantPage((page) => page + 1)}
+              >
+                Load more
+              </button>
+            )}
+
+            {!run.hasMore && !loading && !isStale && (
+              <p className="text-xs text-ink-400">
+                That is everything worth ranking from {run.poolSize} candidates. Track and rate a
+                few more titles to widen the search.
               </p>
-            </>
-          )}
+            )}
+
+            <p className="text-[0.7rem] text-ink-400">
+              Showing {items.length} of {run.poolSize} candidates gathered from your library&rsquo;s
+              neighbours, your top genres and themes, and this week&rsquo;s trending titles.
+            </p>
+          </div>
         </>
+      )}
+
+      {!loading && items.length === 0 && !run.error && (
+        <EmptyState title="No matches with those filters">
+          Loosen the era or popularity filter and try again.
+        </EmptyState>
       )}
     </div>
   );

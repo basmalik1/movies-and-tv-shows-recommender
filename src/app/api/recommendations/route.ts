@@ -6,6 +6,8 @@ import { hasTmdbCredentials } from "@/lib/tmdb/server";
 
 /** The library lives in the browser, so it arrives with each request. Keep it bounded. */
 const MAX_LIBRARY_SIZE = 2000;
+/** Paging sends back everything already shown; cap it so the payload stays sane. */
+const MAX_EXCLUDE_KEYS = 1000;
 
 function asNumberArray(value: unknown): number[] {
   return Array.isArray(value) ? value.filter((entry): entry is number => typeof entry === "number") : [];
@@ -62,9 +64,13 @@ function parseTitle(raw: unknown): TrackedTitle | null {
     runtime: typeof value.runtime === "number" ? value.runtime : null,
     originalLanguage:
       typeof value.originalLanguage === "string" ? value.originalLanguage : "en",
-    totalEpisodes: null,
+    // Carried through so the profile can weigh a series by how much of it was
+    // actually watched, not just by its rating.
+    totalEpisodes: typeof value.totalEpisodes === "number" ? value.totalEpisodes : null,
     totalSeasons: null,
-    watchedEpisodes: [],
+    watchedEpisodes: Array.isArray(value.watchedEpisodes)
+      ? value.watchedEpisodes.filter((key): key is string => typeof key === "string")
+      : [],
     seasons: [],
     lastAiredEpisode: null,
     nextAiredEpisode: null,
@@ -88,6 +94,13 @@ function parseFilters(raw: unknown): RecommendationFilters {
     minYear: typeof value.minYear === "number" ? value.minYear : undefined,
     minVotes: typeof value.minVotes === "number" ? value.minVotes : undefined,
     limit: typeof value.limit === "number" ? value.limit : undefined,
+    page: typeof value.page === "number" ? Math.max(0, Math.floor(value.page)) : 0,
+    // Bounded: this only ever holds keys the client has already been shown.
+    excludeKeys: Array.isArray(value.excludeKeys)
+      ? value.excludeKeys
+          .filter((key): key is string => typeof key === "string")
+          .slice(0, MAX_EXCLUDE_KEYS)
+      : [],
   };
 }
 

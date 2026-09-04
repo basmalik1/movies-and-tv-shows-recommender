@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { DAY, makeTitle } from "@/lib/test-utils";
+import { DAY, makeShow, makeTitle } from "@/lib/test-utils";
 
 import { buildTasteProfile, signalOf } from "./profile";
 
@@ -122,5 +122,62 @@ describe("buildTasteProfile", () => {
     expect(profile.keywords).toEqual({});
     expect(profile.anchors).toEqual([]);
     expect(profile.eraCenter).toBeNull();
+  });
+});
+
+describe("engagement weighting", () => {
+  const now = Date.UTC(2026, 0, 1);
+  const allEpisodes = Array.from({ length: 20 }, (_, i) => `${Math.floor(i / 10) + 1}x${(i % 10) + 1}`);
+
+  it("counts a series you finished more strongly than one rated after two episodes", () => {
+    const finished = makeShow({
+      tmdbId: 1,
+      rating: 9,
+      updatedAt: now,
+      watchedEpisodes: allEpisodes,
+    });
+    const barelyStarted = makeShow({
+      tmdbId: 2,
+      rating: 9,
+      updatedAt: now,
+      watchedEpisodes: ["1x1", "1x2"],
+    });
+
+    expect(signalOf(finished, now)).toBeGreaterThan(signalOf(barelyStarted, now));
+  });
+
+  it("still gives real weight to a series rated without ticking any episodes", () => {
+    const untracked = makeShow({ tmdbId: 3, rating: 9, updatedAt: now, watchedEpisodes: [] });
+    const finished = makeShow({
+      tmdbId: 4,
+      rating: 9,
+      updatedAt: now,
+      watchedEpisodes: allEpisodes,
+    });
+
+    // Not equal, but never less than 65% of a finished show's pull.
+    expect(signalOf(untracked, now)).toBeGreaterThan(signalOf(finished, now) * 0.6);
+  });
+
+  it("leaves films unaffected", () => {
+    const film = makeTitle({ rating: 9, updatedAt: now });
+    const show = makeShow({ rating: 9, updatedAt: now, watchedEpisodes: allEpisodes });
+    expect(signalOf(film, now)).toBeCloseTo(signalOf(show, now), 10);
+  });
+
+  it("makes a TV rating change the profile at all", () => {
+    const unrated = buildTasteProfile([makeShow({ tmdbId: 1, keywordIds: [7] })], now);
+    const loved = buildTasteProfile(
+      [makeShow({ tmdbId: 1, keywordIds: [7], rating: 10 })],
+      now,
+    );
+    const hated = buildTasteProfile(
+      [makeShow({ tmdbId: 1, keywordIds: [7], rating: 2 })],
+      now,
+    );
+
+    expect(loved.keywords[7]).toBeGreaterThan(0);
+    expect(hated.keywords[7]).toBeLessThan(0);
+    expect(unrated.anchors).toHaveLength(1);
   });
 });
