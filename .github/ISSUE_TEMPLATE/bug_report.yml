@@ -1,0 +1,45 @@
+name: Bug report
+description: Something is not working as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, and what did you see?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the app?
+      options:
+        - Search
+        - Library
+        - Episode tracking
+        - Upcoming
+        - Recommendations
+        - Settings / import / export
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Browser and Node version
+      placeholder: Firefox 140, Node 22.11
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console or terminal output
+      render: shell
