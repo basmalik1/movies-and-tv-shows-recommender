@@ -15,6 +15,8 @@ there, which themes matched, and how strongly.
   films from your watchlist, grouped by date.
 - **An explainable recommender.** Not a passthrough of someone else's API endpoint — see
   [How the recommender works](#how-the-recommender-works).
+- **Switchable engines.** Flip between the taste model and TMDB's raw recommendation feed
+  to see what the modelling actually buys you.
 
 ---
 
@@ -148,6 +150,41 @@ enriches the next slice, so scrolling costs one enrich pass per page and never r
 from scratch. The client sends back the keys it has already shown, so a title can never
 appear twice even if the pool shifts between requests.
 
+### Comparing against TMDB's own feed
+
+The **Ranked by** toggle switches between the model above and a deliberately naive
+passthrough of TMDB's `/recommendations` feed ([`tmdb-ranking.ts`](src/lib/recommend/tmdb-ranking.ts),
+[`tmdb-source.ts`](src/lib/recommend/tmdb-source.ts)).
+
+Both engines seed from the same anchors — your highest-signal titles — so the only
+variable is the ranking. The passthrough merges TMDB's feeds, orders by how many of your
+titles agree, then by TMDB's own placement, then by reach. No profile, no cosine, no
+diversification. Its badge shows the TMDB user rating rather than a match score, because
+inventing one would misrepresent what it computed.
+
+The difference is easy to see on a small sci-fi leaning library:
+
+| Rank | Taste model | TMDB passthrough |
+| --- | --- | --- |
+| 1 | Blade Runner | Shameless |
+| 2 | Grey's Anatomy | Blade Runner |
+| 3 | The Expanse | Emergence |
+| 4 | Mad Men | The Chi |
+| 5 | Archive | Upgrade |
+
+The passthrough surfaces co-watch artefacts — *Shameless* and *The Chi* are Chicago dramas
+pulled in by *The Bear* — while the model holds the thematic thread. Neither is strictly
+better, and the passthrough is faster since it skips enrichment entirely; having both
+makes the trade-off visible instead of asking you to take it on trust.
+
+**Why there is no TheTVDB option.** TheTVDB is a metadata database, not a discovery
+service. Its [v4 API](https://thetvdb.github.io/v4-api/) exposes series, movies, episodes,
+seasons, people, artwork, awards, companies, genres, lists and updates — and no endpoint
+for recommendations, similar titles, or related content. The only occurrence of
+"recommend" in its OpenAPI spec is a deprecation note on a query-parameter alias. It also
+requires a per-user subscriber PIN, so wiring it in would add a paid dependency that
+returns nothing TMDB does not already provide.
+
 ### 4. Diversify — `score.ts`
 
 Raw scores tend to return ten variations on one franchise. **Maximal Marginal Relevance**
@@ -174,7 +211,8 @@ src/
 ├── components/                        Presentational + interactive UI
 └── lib/
     ├── library/                       Domain model, IndexedDB repository, progress maths
-    ├── recommend/                     profile → candidates → score → engine
+    ├── recommend/                     profile → candidates → score → engine,
+    │                                   plus the TMDB passthrough baseline
     ├── tmdb/                          Typed client (server + browser), normalization
     └── upcoming.ts                    Library → forward calendar
 ```

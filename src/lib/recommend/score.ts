@@ -37,17 +37,25 @@ export interface IdfTables {
   keywords: SparseVector;
 }
 
-export interface ScoredCandidate extends NormalizedTitle {
+/**
+ * The shape the UI renders, shared by every recommendation source so that
+ * swapping engines never changes the presentation layer.
+ */
+export interface RecommendationItem extends NormalizedTitle {
   key: string;
-  /** 0-100, for display. */
+  /** 0-100. A match score for the custom model, the TMDB rating for the passthrough. */
   score: number;
-  breakdown: ScoreBreakdown;
   reasons: RecommendationReason[];
+  /** Library titles that led here, strongest first. */
+  via: { title: string; rating: number | null }[];
+}
+
+/** What the custom model produces: an item plus the arithmetic behind it. */
+export interface ScoredCandidate extends RecommendationItem {
+  breakdown: ScoreBreakdown;
   matchedKeywords: string[];
   matchedPeople: string[];
   matchedGenres: string[];
-  /** Library titles that led here, strongest first. */
-  via: { title: string; rating: number | null }[];
 }
 
 /**

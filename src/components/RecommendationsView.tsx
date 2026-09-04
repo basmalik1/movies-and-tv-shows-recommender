@@ -5,6 +5,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { useLibrary } from "@/lib/library/LibraryProvider";
 import type { RecommendationResult } from "@/lib/recommend/engine";
+import {
+  RECOMMENDATION_SOURCES,
+  SOURCE_LABELS,
+  type RecommendationSource,
+} from "@/lib/recommend/sources";
 
 import { SparkIcon } from "./icons";
 import { TitleCard, TitleGrid } from "./TitleCard";
@@ -14,10 +19,16 @@ type Recommendation = RecommendationResult["recommendations"][number];
 type MediaFilter = "all" | "movie" | "tv";
 
 interface Filters {
+  source: RecommendationSource;
   mediaType: MediaFilter;
   minYear?: number;
   minVotes?: number;
 }
+
+const SOURCE_BLURB: Record<RecommendationSource, string> = {
+  reel: "Ranked against your own taste profile, with the reasoning shown for every pick.",
+  tmdb: "A straight passthrough of TMDB's own recommendation feed for the titles you liked, in TMDB's ordering. No taste profile, no scoring.",
+};
 
 /** Enough signal for the profile to mean something rather than echo one title. */
 const MIN_USEFUL_LIBRARY = 3;
@@ -46,7 +57,7 @@ const EMPTY_RUN: RunState = {
   error: null,
 };
 
-function ScoreBadge({ score }: { score: number }) {
+function ScoreBadge({ score, source }: { score: number; source: RecommendationSource }) {
   const tone =
     score >= 75
       ? "border-emerald-400/40 bg-emerald-500/20 text-emerald-200"
@@ -57,9 +68,13 @@ function ScoreBadge({ score }: { score: number }) {
   return (
     <span
       className={`rounded-md border px-1.5 py-0.5 text-[0.7rem] font-bold tabular-nums backdrop-blur ${tone}`}
-      title="How closely this matches your taste profile"
+      title={
+        source === "tmdb"
+          ? "TMDB user rating — the passthrough computes no taste match"
+          : "How closely this matches your taste profile"
+      }
     >
-      {score}
+      {source === "tmdb" ? (score / 10).toFixed(1) : score}
     </span>
   );
 }
@@ -113,7 +128,7 @@ function ProfilePanel({ profile }: { profile: RecommendationResult["profile"] })
 
 export function RecommendationsView() {
   const { titles, ready } = useLibrary();
-  const [filters, setFilters] = useState<Filters>({ mediaType: "all" });
+  const [filters, setFilters] = useState<Filters>({ source: "reel", mediaType: "all" });
   /** Bumped whenever the result set should be thrown away and rebuilt. */
   const [runId, setRunId] = useState(0);
   const [wantPage, setWantPage] = useState(0);
@@ -280,7 +295,7 @@ export function RecommendationsView() {
     <div>
       <PageHeader
         title="For you"
-        description="Ranked against your own taste profile, with the reasoning shown for every pick."
+        description={SOURCE_BLURB[filters.source]}
         actions={
           <button
             type="button"
@@ -293,6 +308,34 @@ export function RecommendationsView() {
           </button>
         }
       />
+
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium uppercase tracking-widest text-ink-400">
+          Ranked by
+        </span>
+        <div
+          role="radiogroup"
+          aria-label="Recommendation engine"
+          className="inline-flex rounded-lg border border-ink-700 bg-ink-900 p-0.5"
+        >
+          {RECOMMENDATION_SOURCES.map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="radio"
+              aria-checked={filters.source === option}
+              onClick={() => restart({ ...filters, source: option })}
+              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+                filters.source === option
+                  ? "bg-accent-600 text-ink-950"
+                  : "text-ink-300 hover:text-ink-100"
+              }`}
+            >
+              {SOURCE_LABELS[option]}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="mb-6 flex flex-wrap items-center gap-2">
         {(["all", "movie", "tv"] as MediaFilter[]).map((option) => (
@@ -347,7 +390,22 @@ export function RecommendationsView() {
         <Spinner label="Profiling your library and searching TMDB…" />
       )}
 
-      {profile && <ProfilePanel profile={profile} />}
+      {profile && filters.source === "reel" && <ProfilePanel profile={profile} />}
+
+      {filters.source === "tmdb" && items.length > 0 && (
+        <div className="card mb-7 p-4 text-xs leading-relaxed text-ink-400">
+          <p>
+            These come straight from TMDB&rsquo;s <code className="text-ink-300">/recommendations</code>{" "}
+            feed for the {profile?.anchors.length ?? 0} titles you rated highest, merged and left in
+            TMDB&rsquo;s own order. Titles surfaced by several of your entries rank first.
+          </p>
+          <p className="mt-2">
+            The badge shows TMDB&rsquo;s user rating, not a taste match &mdash; nothing here is
+            scored against your profile. Switch back to{" "}
+            <strong className="text-ink-200">{SOURCE_LABELS.reel}</strong> to compare.
+          </p>
+        </div>
+      )}
 
       {items.length > 0 && (
         <>
@@ -361,7 +419,7 @@ export function RecommendationsView() {
                 posterPath={item.posterPath}
                 year={item.year}
                 priority={index < 6}
-                overlay={<ScoreBadge score={item.score} />}
+                overlay={<ScoreBadge score={item.score} source={filters.source} />}
                 footer={
                   <ul className="space-y-0.5">
                     {item.reasons.slice(0, 2).map((reason) => (
@@ -399,8 +457,9 @@ export function RecommendationsView() {
             )}
 
             <p className="text-[0.7rem] text-ink-400">
-              Showing {items.length} of {run.poolSize} candidates gathered from your library&rsquo;s
-              neighbours, your top genres and themes, and this week&rsquo;s trending titles.
+              {filters.source === "tmdb"
+                ? `Showing ${items.length} of ${run.poolSize} titles from TMDB's recommendation feed.`
+                : `Showing ${items.length} of ${run.poolSize} candidates gathered from your library's neighbours, your top genres and themes, and this week's trending titles.`}
             </p>
           </div>
         </>

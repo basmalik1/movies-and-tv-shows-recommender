@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { TrackedTitle } from "@/lib/library/types";
 import { recommend, type RecommendationFilters } from "@/lib/recommend/engine";
+import { isRecommendationSource } from "@/lib/recommend/sources";
 import { hasTmdbCredentials } from "@/lib/tmdb/server";
 
 /** The library lives in the browser, so it arrives with each request. Keep it bounded. */
@@ -94,6 +95,7 @@ function parseFilters(raw: unknown): RecommendationFilters {
     minYear: typeof value.minYear === "number" ? value.minYear : undefined,
     minVotes: typeof value.minVotes === "number" ? value.minVotes : undefined,
     limit: typeof value.limit === "number" ? value.limit : undefined,
+    source: isRecommendationSource(value.source) ? value.source : "reel",
     page: typeof value.page === "number" ? Math.max(0, Math.floor(value.page)) : 0,
     // Bounded: this only ever holds keys the client has already been shown.
     excludeKeys: Array.isArray(value.excludeKeys)

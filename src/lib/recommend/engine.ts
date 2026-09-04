@@ -13,8 +13,12 @@ import {
   scoreCandidate,
   type CandidateFeatures,
   type IdfTables,
+  type RecommendationItem,
   type ScoredCandidate,
 } from "./score";
+import type { RecommendationSource } from "./sources";
+import { rankTmdbCandidates, toRecommendationItem } from "./tmdb-ranking";
+import { collectTmdbCandidates } from "./tmdb-source";
 import { buildIdf } from "./vector";
 
 /** Detail fetches are the expensive step, so each page enriches only a slice. */
@@ -33,10 +37,13 @@ export interface RecommendationFilters {
   page?: number;
   /** Keys already shown to the user, so scrolling never repeats a title. */
   excludeKeys?: string[];
+  /** Which engine ranks the results. Defaults to the custom model. */
+  source?: RecommendationSource;
 }
 
 export interface RecommendationResult {
-  recommendations: ScoredCandidate[];
+  recommendations: RecommendationItem[];
+  source: RecommendationSource;
   profile: ReturnType<typeof describeProfile> & {
     sampleSize: number;
     ratedCount: number;
@@ -99,7 +106,10 @@ async function enrich(candidate: Candidate): Promise<CandidateFeatures | null> {
   };
 }
 
-function passesFilters(candidate: Candidate, filters: RecommendationFilters): boolean {
+function passesFilters(
+  candidate: Pick<Candidate, "mediaType" | "year" | "voteCount">,
+  filters: RecommendationFilters,
+): boolean {
   if (filters.mediaType && filters.mediaType !== "all" && candidate.mediaType !== filters.mediaType) {
     return false;
   }
@@ -125,6 +135,11 @@ export async function recommend(
   const excluded = new Set(filters.excludeKeys ?? []);
 
   const profile = buildTasteProfile(library);
+
+  if (filters.source === "tmdb") {
+    return recommendFromTmdb(profile, filters, { limit, page, excluded });
+  }
+
   const [genreNames, pool] = await Promise.all([
     loadGenreNames(),
     generateCandidates(profile),
@@ -171,6 +186,7 @@ export async function recommend(
 
   return {
     recommendations: diversify(scored, featuresByKey, limit),
+    source: "reel",
     profile: {
       ...describeProfile(profile, genreNames),
       sampleSize: profile.sampleSize,
@@ -190,4 +206,47 @@ export async function recommend(
   };
 }
 
-export type { TasteProfile, ScoredCandidate };
+/**
+ * TMDB passthrough. No enrichment and no scoring, so the whole ranked list is
+ * built in one go and paging is a slice of it.
+ */
+async function recommendFromTmdb(
+  profile: TasteProfile,
+  filters: RecommendationFilters,
+  { limit, page, excluded }: { limit: number; page: number; excluded: Set<string> },
+): Promise<RecommendationResult> {
+  const [genreNames, candidates] = await Promise.all([
+    loadGenreNames(),
+    collectTmdbCandidates(profile, new Set([...profile.excludeIds, ...excluded])),
+  ]);
+
+  // Filtering is not ranking, so the same media/era/popularity controls apply
+  // here without compromising the passthrough as a baseline.
+  const ranked = rankTmdbCandidates(
+    candidates.filter((candidate) => passesFilters(candidate, filters)),
+  );
+  const start = page * limit;
+
+  return {
+    recommendations: ranked.slice(start, start + limit).map(toRecommendationItem),
+    source: "tmdb",
+    profile: {
+      ...describeProfile(profile, genreNames),
+      sampleSize: profile.sampleSize,
+      ratedCount: profile.ratedCount,
+      eraCenter: profile.eraCenter ? Math.round(profile.eraCenter) : null,
+      anchors: profile.anchors.slice(0, 6).map((anchor) => ({
+        title: anchor.title,
+        rating: anchor.rating,
+        posterPath: anchor.posterPath,
+      })),
+    },
+    page,
+    hasMore: ranked.length > start + limit,
+    poolSize: ranked.length,
+    enrichedCount: 0,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+export type { TasteProfile, ScoredCandidate, RecommendationItem };
