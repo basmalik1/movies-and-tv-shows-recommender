@@ -9,6 +9,7 @@ import {
   CalendarIcon,
   HomeIcon,
   LibraryIcon,
+  ListIcon,
   SearchIcon,
   SettingsIcon,
   SparkIcon,
@@ -18,7 +19,8 @@ const NAV = [
   { href: "/", label: "Home", Icon: HomeIcon },
   { href: "/search", label: "Search", Icon: SearchIcon },
   { href: "/library", label: "Library", Icon: LibraryIcon },
-  { href: "/upcoming", label: "Upcoming", Icon: CalendarIcon },
+  { href: "/calendar", label: "Calendar", Icon: CalendarIcon },
+  { href: "/upcoming", label: "Upcoming", Icon: ListIcon },
   { href: "/recommendations", label: "For you", Icon: SparkIcon },
   { href: "/settings", label: "Settings", Icon: SettingsIcon },
 ] as const;

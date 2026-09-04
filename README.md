@@ -11,8 +11,9 @@ there, which themes matched, and how strongly.
   nothing uploaded. Export and re-import it as JSON whenever you like.
 - **Real episode tracking.** Tick off individual episodes, whole seasons, or everything
   up to a point. Progress is measured against episodes that have actually aired.
-- **A forward calendar.** Upcoming episodes, announced season premieres, and unreleased
-  films from your watchlist, grouped by date.
+- **A real calendar.** A month grid of every announced episode for the shows you are
+  part-way through, so a weekly show shows up as a weekly rhythm rather than a single
+  "next episode" line. Plus an agenda view of everything ahead.
 - **An explainable recommender.** Not a passthrough of someone else's API endpoint — see
   [How the recommender works](#how-the-recommender-works).
 - **Switchable engines.** Flip between the taste model and TMDB's raw recommendation feed
@@ -196,6 +197,29 @@ the matched themes, the recurring names.
 
 ---
 
+## The calendar
+
+`/calendar` lays out a month grid; `/upcoming` is the same data as a forward agenda list.
+
+The grid needs more data than the agenda does. A TMDB series detail carries only
+`next_episode_to_air` — one date — which is fine for "what's next" but leaves a month
+view nearly empty. So [`/api/schedule`](src/app/api/schedule/route.ts) expands the
+relevant seasons through TMDB's season endpoint and returns one entry per episode inside
+the visible window. [`expandableSeasons`](src/lib/upcoming.ts) decides which seasons are
+worth fetching — the one currently airing, plus anything premiering inside the window —
+so a show costs one request, not one per season.
+
+Layout maths lives in [`calendar.ts`](src/lib/calendar.ts) and is pure: given a year,
+month and a list of entries it returns whole weeks padded with the surrounding days.
+Everything is computed in UTC against `yyyy-mm-dd` strings, because doing it in local
+time drops an episode into the wrong cell for anyone west of Greenwich.
+
+Scope defaults to **shows you are watching**, which is usually the question being asked,
+and widens to everything tracked. On phones the cells collapse to coloured dots so all
+seven columns fit without sideways scrolling, with the month's full list underneath.
+
+---
+
 ## Architecture
 
 ```
@@ -203,8 +227,10 @@ src/
 ├── app/
 │   ├── api/
 │   │   ├── recommendations/route.ts   POST — runs the pipeline
+│   │   ├── schedule/route.ts          POST — expands seasons into episode dates
 │   │   └── tmdb/[...path]/route.ts    Allowlisted read-only TMDB proxy
 │   ├── title/[mediaType]/[id]/        Detail page, cast, themes, episode tracker
+│   ├── calendar/                      Month grid of upcoming episodes
 │   ├── library/ search/ upcoming/     Client views
 │   ├── recommendations/ settings/
 │   └── layout.tsx  page.tsx           Shell + dashboard

@@ -154,3 +154,62 @@ export function formatDateHeading(date: string): string {
     timeZone: "UTC",
   });
 }
+
+/**
+ * Which seasons need their episode list fetched to fill a date range.
+ *
+ * A series detail from TMDB only carries `next_episode_to_air`, which is one
+ * date. A calendar needs every episode, so the season currently airing (and any
+ * season premiering inside the window) has to be expanded episode by episode.
+ */
+export function expandableSeasons(
+  title: TrackedTitle,
+  { from, to }: { from: string; to: string },
+): number[] {
+  if (title.mediaType !== "tv") return [];
+
+  const seasons = new Set<number>();
+
+  // The season currently airing carries the rest of this run's episodes.
+  if (title.nextAiredEpisode) seasons.add(title.nextAiredEpisode.season);
+  if (title.lastAiredEpisode) seasons.add(title.lastAiredEpisode.season);
+
+  // Plus anything premiering inside the window.
+  for (const season of title.seasons) {
+    if (season.seasonNumber <= 0 || !season.airDate) continue;
+    if (season.airDate >= from && season.airDate <= to) seasons.add(season.seasonNumber);
+  }
+
+  return [...seasons].filter((number) => number > 0).sort((a, b) => a - b);
+}
+
+/** Films need no expansion: their one date is already on the record. */
+export function movieEntriesInRange(
+  titles: TrackedTitle[],
+  { from, to, now = new Date() }: { from: string; to: string; now?: Date },
+): UpcomingEntry[] {
+  const today = isoDay(now);
+
+  return titles
+    .filter(
+      (title) =>
+        title.mediaType === "movie" &&
+        title.status !== "dropped" &&
+        title.status !== "completed" &&
+        title.date !== null &&
+        title.date >= from &&
+        title.date <= to,
+    )
+    .map((title) => ({
+      id: `${title.id}:release`,
+      tmdbId: title.tmdbId,
+      mediaType: "movie" as const,
+      title: title.title,
+      posterPath: title.posterPath,
+      kind: "movie-release" as const,
+      date: title.date as string,
+      headline: "In cinemas",
+      detail: null,
+      daysAway: daysBetween(today, title.date as string),
+    }));
+}
