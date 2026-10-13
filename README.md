@@ -13,7 +13,8 @@ there, which themes matched, and how strongly.
   up to a point. Progress is measured against episodes that have actually aired.
 - **A real calendar.** A month grid of every announced episode for the shows you are
   part-way through, so a weekly show shows up as a weekly rhythm rather than a single
-  "next episode" line. Plus an agenda view of everything ahead.
+  "next episode" line. Plus an agenda view of everything ahead, and a one-click check for
+  newly announced seasons and dates.
 - **An explainable recommender.** Not a passthrough of someone else's API endpoint — see
   [How the recommender works](#how-the-recommender-works).
 - **Switchable engines.** Flip between the taste model and TMDB's raw recommendation feed
@@ -213,6 +214,14 @@ Layout maths lives in [`calendar.ts`](src/lib/calendar.ts) and is pure: given a 
 month and a list of entries it returns whole weeks padded with the surrounding days.
 Everything is computed in UTC against `yyyy-mm-dd` strings, because doing it in local
 time drops an episode into the wrong cell for anyone west of Greenwich.
+
+**Check for updates** rechecks only the titles that can still gain a future release —
+series you are watching, series that may return, and films you have not seen — and reports
+what actually changed: a season announced, an episode dated, a release moved. A refresh
+that only says "checked 14 titles" answers the wrong question, so the diff
+([`updates.ts`](src/lib/library/updates.ts)) is the feature and is tested as one. It
+deliberately stays quiet when a show simply advances to its next episode, since that is
+not news. Settings keeps a separate full resync for everything tracked.
 
 Scope defaults to **shows you are watching**, which is usually the question being asked,
 and widens to everything tracked. On phones the cells collapse to coloured dots so all

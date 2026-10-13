@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { useLibrary } from "@/lib/library/LibraryProvider";
 import {
@@ -11,7 +11,7 @@ import {
   type UpcomingEntry,
 } from "@/lib/upcoming";
 
-import { RefreshIcon } from "./icons";
+import { CheckForUpdates } from "./CheckForUpdates";
 import { EmptyState, PageHeader, Poster, Spinner } from "./ui";
 
 const KIND_STYLES: Record<UpcomingEntry["kind"], string> = {
@@ -42,24 +42,9 @@ function EntryRow({ entry }: { entry: UpcomingEntry }) {
 }
 
 export function UpcomingView() {
-  const { titles, ready, refreshAll } = useLibrary();
-  const [refreshing, setRefreshing] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const { titles, ready } = useLibrary();
 
   const schedule = useMemo(() => buildSchedule(titles), [titles]);
-
-  async function refresh() {
-    setRefreshing(true);
-    setMessage(null);
-    try {
-      const count = await refreshAll();
-      setMessage(`Checked ${count} ${count === 1 ? "title" : "titles"} for new air dates.`);
-    } catch {
-      setMessage("Could not reach TMDB. Check your connection and try again.");
-    } finally {
-      setRefreshing(false);
-    }
-  }
 
   if (!ready) {
     return (
@@ -75,22 +60,9 @@ export function UpcomingView() {
       <PageHeader
         title="Upcoming"
         description="Episodes and releases ahead for everything you track, for the next six months."
-        actions={
-          titles.length > 0 ? (
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={() => void refresh()}
-              disabled={refreshing}
-            >
-              <RefreshIcon width={15} height={15} className={refreshing ? "animate-spin" : ""} />
-              {refreshing ? "Refreshing…" : "Refresh air dates"}
-            </button>
-          ) : null
-        }
       />
 
-      {message && <p className="mb-4 text-sm text-ink-400">{message}</p>}
+      {titles.length > 0 && <CheckForUpdates className="mb-5" />}
 
       {schedule.total === 0 && schedule.unscheduled.length === 0 ? (
         <EmptyState title="Nothing scheduled">

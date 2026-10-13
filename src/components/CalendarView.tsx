@@ -20,6 +20,7 @@ import {
   type UpcomingEntry,
 } from "@/lib/upcoming";
 
+import { CheckForUpdates } from "./CheckForUpdates";
 import { CalendarIcon, ChevronIcon } from "./icons";
 import { EmptyState, ErrorNotice, PageHeader, Poster, Spinner } from "./ui";
 
@@ -259,6 +260,8 @@ export function CalendarView() {
           </div>
         }
       />
+
+      <CheckForUpdates className="mb-5" />
 
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-1.5">

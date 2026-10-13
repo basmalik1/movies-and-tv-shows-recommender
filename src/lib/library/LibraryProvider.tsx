@@ -14,6 +14,7 @@ import { fetchTitleDetail } from "@/lib/tmdb/client";
 import type { MediaType, TmdbTitleDetail } from "@/lib/tmdb/types";
 
 import { trackedTitleFromDetail } from "./factory";
+import { diffTitle, followedTitles, type TitleUpdate, type UpdateReport } from "./updates";
 import { createLibraryRepository } from "./indexeddb";
 import {
   episodeKey,
@@ -47,11 +48,16 @@ interface LibraryContextValue {
   /** Re-fetch TMDB metadata (new seasons, air dates) while keeping user data. */
   refresh(id: string): Promise<void>;
   refreshAll(): Promise<number>;
+  /** Recheck only the shows and films that can still gain a future release. */
+  checkForUpdates(): Promise<UpdateReport>;
 
   exportLibrary(): LibraryExport;
   importLibrary(data: unknown, mode: "merge" | "replace"): Promise<number>;
   clearLibrary(): Promise<void>;
 }
+
+/** Enough parallelism to feel instant, few enough to be polite to the proxy. */
+const UPDATE_CONCURRENCY = 5;
 
 const LibraryContext = createContext<LibraryContextValue | null>(null);
 
@@ -245,6 +251,56 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     return updated;
   }, [refresh, titles]);
 
+  /**
+   * Recheck the titles that can still gain a future release, and report what
+   * changed rather than just how many were touched.
+   *
+   * Runs a few at a time: this is user-initiated with a spinner attached, so
+   * unlike the background full resync it should not take a minute to finish.
+   */
+  const checkForUpdates = useCallback(async (): Promise<UpdateReport> => {
+    const candidates = followedTitles(titles);
+    const updates: TitleUpdate[] = [];
+    const refreshed: TrackedTitle[] = [];
+    let failed = 0;
+    let cursor = 0;
+
+    async function worker() {
+      while (cursor < candidates.length) {
+        const before = candidates[cursor];
+        cursor += 1;
+        try {
+          const detail = await fetchTitleDetail(before.mediaType, before.tmdbId);
+          const after = trackedTitleFromDetail(detail, {
+            existing: before,
+            status: before.status,
+          });
+          updates.push(...diffTitle(before, after));
+          refreshed.push(after);
+        } catch (error) {
+          failed += 1;
+          console.warn(`Could not check ${before.title}`, error);
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(UPDATE_CONCURRENCY, candidates.length) }, worker),
+    );
+
+    // One write for the whole batch rather than a re-render per title.
+    if (refreshed.length > 0) {
+      await repository().putMany(refreshed);
+      setTitles((current) => {
+        const merged = new Map(current.map((title) => [title.id, title] as const));
+        for (const title of refreshed) merged.set(title.id, title);
+        return [...merged.values()];
+      });
+    }
+
+    return { checked: candidates.length, failed, updates };
+  }, [repository, titles]);
+
   const exportLibrary = useCallback(
     (): LibraryExport => ({
       version: 1,
@@ -311,6 +367,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       markWatchedThrough,
       refresh,
       refreshAll,
+      checkForUpdates,
       exportLibrary,
       importLibrary,
       clearLibrary,
@@ -330,6 +387,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       markWatchedThrough,
       refresh,
       refreshAll,
+      checkForUpdates,
       exportLibrary,
       importLibrary,
       clearLibrary,
