@@ -49,6 +49,24 @@ npm run dev
 Open <http://localhost:3000>. The app tells you what is missing if the token is absent,
 so you will not be staring at a blank screen.
 
+### On Windows: just double-click
+
+[`start-reel.bat`](start-reel.bat) does all of the above for you. Double-click it and it
+will install dependencies if they are missing, create `.env.local` from the template,
+build the app if there is nothing to serve, start the production server, and open your
+browser once the server actually answers.
+
+If Reel is already running it just opens the tab rather than starting a second copy, and
+it says plainly what is missing — no Node, no token — instead of failing with a stack
+trace. Pass `rebuild` to force a fresh build after changing code:
+
+```
+start-reel.bat rebuild
+```
+
+It is a convenience wrapper, not a packaged application: it still needs Node.js installed
+and still runs the same `npm` scripts. The commands above work on every platform.
+
 ---
 
 ## How the recommender works
